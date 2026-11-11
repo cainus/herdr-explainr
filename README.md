@@ -53,7 +53,11 @@ At the top of `main.js`:
 ## How it works
 
 1. Copies the focused terminal's selection (`terminal.copy`), then puts your
-   clipboard's text back.
+   clipboard's text back. Programs that track the mouse, like Claude Code, take
+   the drag themselves, so Herdr has no selection; Claude Code copies its own
+   selection to the clipboard, so explainr uses the clipboard then. (Hold Shift
+   while dragging to make a Herdr selection instead.) Each run's steps are
+   logged to `~/.config/herdr-app/data/explainr-debug.log`.
 2. Reads the terminal's screen with `hc read`.
 3. If the terminal's foreground process is Claude Code, finds its session ID
    in `~/.claude/sessions/<pid>.json` and forks that session.

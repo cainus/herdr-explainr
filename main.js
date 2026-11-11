@@ -1,7 +1,8 @@
 // explainr: select text in a Herdr terminal, press a key, get it explained in context.
 //
 // Opened with `mod.open:explainr` (see README). On open it copies the focused
-// terminal's selection, reads that terminal's recent screen and folder, and asks
+// terminal's selection (or, when a mouse-tracking program like Claude Code took
+// the drag, uses the clipboard, where Claude Code put its selection), reads that terminal's recent screen and folder, and asks
 // Claude to explain the selection. When the terminal is running Claude Code, it
 // asks a throwaway fork of that agent's own session, so the answer knows the whole
 // conversation; the agent itself is never touched. Otherwise it asks a fresh
@@ -120,9 +121,13 @@ export default class Explainr extends View {
     }
     if (before) await copy(before);
     if (!after) {
-      this.canUseClipboard = Boolean(before);
-      return this.fail(cx, "Couldn't read a selection from the terminal. Select some text and press the key again" +
-        (before ? ", or explain what's on your clipboard instead." : "."));
+      // Programs that track the mouse (Claude Code, vim, htop...) get the drag,
+      // so Herdr has no selection. Claude Code copies its own selection to the
+      // clipboard, so the clipboard is where the selected text is.
+      if (!before) return this.fail(cx, "Nothing is selected and the clipboard is empty. Select some text, then press the key again.");
+      this.log(`using clipboard: ${before.length} chars`);
+      this.fromClipboard = true;
+      after = before;
     }
     await this.explain(cx, after);
   }
@@ -131,16 +136,6 @@ export default class Explainr extends View {
   log(line) {
     this.trail = `${this.trail ?? ""}${new Date().toISOString()} ${line}\n`;
     fs.writeFile(`${appHome()}/data/explainr-debug.log`, this.trail).catch(() => {});
-  }
-
-  useClipboard(cx) {
-    this.canUseClipboard = false;
-    this.phase = "starting";
-    this.error = null;
-    cx.notify();
-    cx.spawn(async (cx) => {
-      try { await this.explain(cx, this.clipboard); } catch (e) { this.fail(cx, String(e?.message ?? e)); }
-    });
   }
 
   async explain(cx, selection) {
@@ -165,6 +160,7 @@ export default class Explainr extends View {
     // The prompt goes in on stdin: `--tools` takes several values and would swallow it.
     const result = await exec("/bin/sh", ["-c", 'p="$1"; shift; printf %s "$p" | "$@"', "sh", prompt, CLAUDE, ...args],
       { cwd: this.cwd ?? home(), timeout: TIMEOUT_MS }).catch((e) => ({ code: -1, stdout: "", stderr: String(e?.message ?? e) }));
+    this.log(`claude: code=${result.code} out=${result.stdout.length} err=${(result.stderr || "").slice(0, 300)}`);
     const turn = this.turns[this.turns.length - 1];
     if (result.code !== 0 || !result.stdout.trim()) {
       this.turns.pop();
@@ -201,7 +197,8 @@ export default class Explainr extends View {
     const spinner = (label) => h_flex().gap(8).items_center().text_color(t.muted).text_size(12.5)
       .child(div().text_color(t.accent).frames(SPINNER, 90).child(SPINNER[0]))
       .child(label);
-    const source = this.session ? "Fork of this Claude session" : this.selection ? "From the terminal screen" : "";
+    const source = [this.fromClipboard ? "Selection from clipboard" : "", this.session ? "Fork of this Claude session" : this.selection ? "Terminal screen as context" : ""]
+      .filter(Boolean).join(" · ");
 
     const body = v_flex().gap(14);
     this.turns.forEach((turn, i) => {
@@ -212,8 +209,6 @@ export default class Explainr extends View {
     });
     if (this.phase === "starting") body.child(spinner("Reading the selection…"));
     if (this.phase === "error") body.child(div().text_size(12.5).text_color(t.blocked).child(this.error ?? "Something went wrong."));
-    if (this.phase === "error" && this.canUseClipboard) body.child(h_flex().child(
-      button("ex-clipboard", "Explain clipboard", true, (_e, cx) => this.useClipboard(cx))));
 
     const last = [...this.turns].reverse().find((x) => x.a);
     return v_flex().id("explainr").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
