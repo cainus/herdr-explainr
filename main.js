@@ -9,7 +9,8 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
-import { run, props, closeOverlay, theme, focused, terminals, exec, hc, home, readTextFile } from "herdr";
+import { run, props, closeOverlay, theme, focused, terminals, exec, hc, home, appHome, readTextFile } from "herdr";
+import * as fs from "fs/promises";
 
 // --- Settings --------------------------------------------------------------
 const CLAUDE = "claude";           // the Claude Code CLI (a name on PATH, or a full path)
@@ -88,18 +89,63 @@ export default class Explainr extends View {
     if (!address) return this.fail(cx, "Focus a terminal and select some text first.");
     this.cwd = f.cwd ?? terminals().find((t) => t.address === address)?.cwd ?? null;
 
+    this.address = address;
+    this.log(`open: focused=${JSON.stringify(f)}`);
+
     // Copy the selection. A sentinel tells "nothing selected" apart from a
     // selection that matches the clipboard; the clipboard's text is put back.
     const before = await paste();
+    this.clipboard = before;
     const sentinel = `explainr-${Date.now()}`;
     if (before) await copy(sentinel);
+    const copied = async (label) => {
+      for (let i = 0; i < 6; i++) {
+        await sleep(cx, 80);
+        const now = await paste();
+        if (now && now !== sentinel) { this.log(`${label}: got ${now.length} chars`); return now; }
+      }
+      this.log(`${label}: nothing (focused=${JSON.stringify(focused())})`);
+      return null;
+    };
     run("terminal.copy");
-    await sleep(cx, 120);
-    const after = await paste();
+    let after = await copied("copy");
+    if (!after) {
+      // This dialog has the keyboard, and copy follows the focused block:
+      // give the terminal focus back for the copy, then take it again.
+      run("pane.focus", { terminal: address });
+      await sleep(cx, 60);
+      run("terminal.copy");
+      after = await copied("copy after pane.focus");
+      this.handle.focus();
+    }
     if (before) await copy(before);
-    if (!after || after === sentinel) return this.fail(cx, "Nothing is selected. Select some text in the terminal, then press the key again.");
-    this.selection = after;
+    if (!after) {
+      this.canUseClipboard = Boolean(before);
+      return this.fail(cx, "Couldn't read a selection from the terminal. Select some text and press the key again" +
+        (before ? ", or explain what's on your clipboard instead." : "."));
+    }
+    await this.explain(cx, after);
+  }
 
+  // Debug trail: ~/.config/herdr-app/data/explainr-debug.log (the last run only).
+  log(line) {
+    this.trail = `${this.trail ?? ""}${new Date().toISOString()} ${line}\n`;
+    fs.writeFile(`${appHome()}/data/explainr-debug.log`, this.trail).catch(() => {});
+  }
+
+  useClipboard(cx) {
+    this.canUseClipboard = false;
+    this.phase = "starting";
+    this.error = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try { await this.explain(cx, this.clipboard); } catch (e) { this.fail(cx, String(e?.message ?? e)); }
+    });
+  }
+
+  async explain(cx, selection) {
+    const address = this.address;
+    this.selection = selection;
     const [screen, session] = await Promise.all([
       hc(["read", address, "--lines", String(SCREEN_LINES)]).then((r) => (r.code === 0 ? r.stdout : "")),
       claudeSession(address),
@@ -166,6 +212,8 @@ export default class Explainr extends View {
     });
     if (this.phase === "starting") body.child(spinner("Reading the selection…"));
     if (this.phase === "error") body.child(div().text_size(12.5).text_color(t.blocked).child(this.error ?? "Something went wrong."));
+    if (this.phase === "error" && this.canUseClipboard) body.child(h_flex().child(
+      button("ex-clipboard", "Explain clipboard", true, (_e, cx) => this.useClipboard(cx))));
 
     const last = [...this.turns].reverse().find((x) => x.a);
     return v_flex().id("explainr").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
